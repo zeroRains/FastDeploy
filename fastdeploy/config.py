@@ -1517,6 +1517,13 @@ class FDConfig:
 
         self.paddle_commit_id = paddle.version.commit
 
+        if self.scheduler_config.splitwise_role == "decode" and self.cache_config.enable_chunked_prefill:
+            # NOTE(lulinjun): D nodes do not need to enable chunked prefill.
+            self.cache_config.enable_chunked_prefill = False
+            self.scheduler_config.max_num_batched_tokens = None
+            self.max_num_partial_prefills = 1
+            self.max_long_partial_prefills = 1
+
         if self.scheduler_config.max_num_batched_tokens is None:
             if int(envs.ENABLE_V1_KVCACHE_SCHEDULER):
                 if paddle.is_compiled_with_xpu():
