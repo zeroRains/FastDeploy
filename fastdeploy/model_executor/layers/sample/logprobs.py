@@ -145,7 +145,7 @@ def build_output_logprobs(
     logprobs_mode: str = "default",
     compute_logprobs_fn: Optional[Callable] = None,
     real_bsz: int = 0,
-) -> Tuple[Optional[LogprobsTensors], Optional[paddle.Tensor]]:
+) -> Tuple[Optional[LogprobsTensors], Optional[paddle.Tensor], Optional[paddle.Tensor]]:
     """
     Build logprobs output for both NAIVE and speculative (MTP/Ngram) modes.
 
@@ -165,14 +165,10 @@ def build_output_logprobs(
             scaling and top_p normalization. Used when logprobs_mode == "raw_logprobs".
 
     Returns:
-        tuple: (logprobs_tensors, cu_batch_token_offset)
+        tuple: (logprobs_tensors, cu_batch_token_offset, output_logits)
     """
     num_logprobs = sampling_metadata.max_num_logprobs
     logprobs_tensors = None
-    cu_batch_token_offset = None
-
-    if num_logprobs is None:
-        return logprobs_tensors, cu_batch_token_offset
 
     max_draft_token_num = share_inputs["accept_tokens"].shape[1]
     max_occupied_slots = share_inputs["seq_lens_this_time"].shape[0]
@@ -204,7 +200,9 @@ def build_output_logprobs(
             share_inputs["accept_num"],
             share_inputs["accept_tokens"],
         )
-
+    # Adapate for sampling mask
+    if num_logprobs is None:
+        return None, None, output_logits
     # Compute logprobs with temperature scaling and top_p normalization
     if logprobs_mode == "raw_logprobs":
         raw_logprobs = compute_logprobs_fn(output_logits, sampling_metadata, real_bsz)
@@ -214,5 +212,32 @@ def build_output_logprobs(
         raw_logprobs = F.log_softmax(output_logits, axis=-1)
 
     logprobs_tensors = gather_logprobs(raw_logprobs, num_logprobs, token_ids=token_ids)
+    # output_logits use to compute sampling_mask
+    return logprobs_tensors, share_inputs["cu_batch_token_offset"], output_logits
 
-    return logprobs_tensors, share_inputs["cu_batch_token_offset"]
+
+def logprobs_renormalize_with_logz(logprobs: paddle.Tensor, logz, logprobs_tensors: LogprobsTensors):
+    """
+    Renormalize logprobs to match truncated sampling distribution.
+    Args:
+        logprobs: tensor [B, max_num_logprobs + 1]
+        logz: [B], log(sum(probs in candidate set K)) for each request.
+              Can be np.ndarray or paddle.Tensor (CPU pinned memory).
+        logprobs_tensors: LogprobsTensors
+    """
+    if isinstance(logz, paddle.Tensor):
+        logz = logz.astype(logprobs.dtype)
+    else:
+        logz = paddle.to_tensor(logz, dtype=logprobs.dtype)
+    # Renormalize: log π_masked = log π_full - log Z_K
+    # Only normalize valid candidates; padding positions use -inf
+    valid_mask = paddle.isfinite(logprobs)
+    normalized_logprobs = paddle.where(
+        valid_mask, logprobs - logz.unsqueeze(1), paddle.full_like(logprobs, float("-inf"))
+    )
+    # Update logprobs_tensors with normalized values
+    return LogprobsTensors(
+        logprob_token_ids=logprobs_tensors.logprob_token_ids,
+        logprobs=normalized_logprobs,
+        selected_token_ranks=logprobs_tensors.selected_token_ranks,
+    )

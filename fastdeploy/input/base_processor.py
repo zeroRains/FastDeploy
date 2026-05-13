@@ -305,6 +305,7 @@ class BaseTextProcessor(ABC):
                     response_dict["outputs"]["tool_calls"] = tool_call_info.tool_calls
 
             if req_id in self.decode_status:
+                data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
                 del self.decode_status[req_id]
             if req_id in self.model_status_dict:
                 del self.model_status_dict[req_id]
@@ -373,6 +374,7 @@ class BaseTextProcessor(ABC):
                     response_dict["outputs"]["skipped"] = True
 
         if is_end:
+            data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]
             if req_id in self.tool_parser_dict:
                 del self.tool_parser_dict[req_id]
